@@ -2,13 +2,25 @@
 
 mDNS-advertised HTTP service for controlling Firefox and media playback on a local machine.
 
+## Requirements
+
+- Python 3.11+
+- Firefox installed on the host machine
+- `playerctl` for media controls: `sudo apt install playerctl`
+
 ## Setup
 
+Clone the repo and set up a virtual environment:
+
 ```bash
+git clone <repo-url>
+cd mesmerize
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
+
+The service must run on the machine where Firefox is installed — not over SSH — so that it can open browser windows and control media on the local display.
 
 ## Running
 
