@@ -4,6 +4,7 @@ import socket
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import ThreadingMixIn
 
 from zeroconf import ServiceInfo, Zeroconf
 
@@ -19,17 +20,26 @@ class _FirefoxHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._respond(200, {"status": "ok"})
         elif self.path == "/media":
+            if not self.server.enable_playerctl:
+                self._respond(503, {"error": "playerctl disabled"})
+                return
             try:
                 self._respond(200, {"position": playerctl.get_position()})
             except PlayerctlError as exc:
                 self._respond(500, {"error": str(exc)})
         elif self.path == "/media/stream":
+            if not self.server.enable_observer:
+                self._respond(503, {"error": "observer disabled"})
+                return
             self._stream_media()
         else:
             self._respond(404, {"error": "not found"})
 
     def do_POST(self):
         if self.path == "/media":
+            if not self.server.enable_playerctl:
+                self._respond(503, {"error": "playerctl disabled"})
+                return
             self._handle_media()
             return
 
@@ -123,20 +133,26 @@ class _FirefoxHandler(BaseHTTPRequestHandler):
 
     def _respond(self, code: int, body: dict) -> None:
         payload = json.dumps(body).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def log_message(self, fmt, *args):  # silence default access log
         pass
 
 
-class _MesmerizeHTTPServer(HTTPServer):
-    def __init__(self, port: int, firefox_executable: str):
+class _MesmerizeHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    def __init__(self, port: int, firefox_executable: str, enable_playerctl: bool, enable_observer: bool):
         super().__init__(("", port), _FirefoxHandler)
         self.firefox_executable = firefox_executable
+        self.enable_playerctl = enable_playerctl
+        self.enable_observer = enable_observer
 
 
 class MesmerizeService:
@@ -147,10 +163,14 @@ class MesmerizeService:
         port: int = 8765,
         name: str = "Mesmerize",
         firefox_executable: str = "firefox",
+        enable_playerctl: bool = True,
+        enable_observer: bool = True,
     ):
         self.port = port
         self.name = name
         self.firefox_executable = firefox_executable
+        self.enable_playerctl = enable_playerctl
+        self.enable_observer = enable_observer
         self._zeroconf: Zeroconf | None = None
         self._server: _MesmerizeHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -158,7 +178,7 @@ class MesmerizeService:
     def start(self) -> None:
         local_ip = _local_ip()
 
-        self._server = _MesmerizeHTTPServer(self.port, self.firefox_executable)
+        self._server = _MesmerizeHTTPServer(self.port, self.firefox_executable, self.enable_playerctl, self.enable_observer)
 
         self._zeroconf = Zeroconf()
         info = ServiceInfo(

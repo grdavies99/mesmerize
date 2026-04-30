@@ -1,0 +1,7 @@
+{
+    "port": 8765,
+    "name": "Mesmerize",
+    "firefox_executable": "firefox",
+    "enable_playerctl": true,
+    "enable_observer": true
+}

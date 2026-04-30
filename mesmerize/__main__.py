@@ -2,17 +2,24 @@ import argparse
 import signal
 import threading
 
+from mesmerize.config import Config
 from mesmerize.service import MesmerizeService
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Mesmerize mDNS Firefox control service")
-    parser.add_argument("--port", type=int, default=8765, help="HTTP port (default: 8765)")
-    parser.add_argument("--name", default="Mesmerize", help="mDNS service name (default: Mesmerize)")
-    parser.add_argument("--firefox", default="firefox", help="Firefox executable (default: firefox)")
+    parser.add_argument("--config", help="Path to JSON config file")
     args = parser.parse_args()
 
-    service = MesmerizeService(port=args.port, name=args.name, firefox_executable=args.firefox)
+    cfg = Config.load(args.config) if args.config else Config()
+
+    service = MesmerizeService(
+        port=cfg.port,
+        name=cfg.name,
+        firefox_executable=cfg.firefox_executable,
+        enable_playerctl=cfg.enable_playerctl,
+        enable_observer=cfg.enable_observer,
+    )
     service.start()
 
     stop = threading.Event()
