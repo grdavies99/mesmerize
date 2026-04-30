@@ -1,4 +1,5 @@
 import json
+import queue
 import socket
 import subprocess
 import threading
@@ -6,15 +7,24 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from zeroconf import ServiceInfo, Zeroconf
 
-SERVICE_TYPE = "_mesmerize._tcp.local."
+import mesmerize.playerctl as playerctl
+from mesmerize.observer import Observer
+from mesmerize.playerctl import PlayerctlError
 
-_MEDIA_ACTIONS = {"play", "pause", "play-pause", "next", "previous", "stop"}
+SERVICE_TYPE = "_mesmerize._tcp.local."
 
 
 class _FirefoxHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
             self._respond(200, {"status": "ok"})
+        elif self.path == "/media":
+            try:
+                self._respond(200, {"position": playerctl.get_position()})
+            except PlayerctlError as exc:
+                self._respond(500, {"error": str(exc)})
+        elif self.path == "/media/stream":
+            self._stream_media()
         else:
             self._respond(404, {"error": "not found"})
 
@@ -51,26 +61,65 @@ class _FirefoxHandler(BaseHTTPRequestHandler):
         except FileNotFoundError:
             self._respond(500, {"error": f"Firefox not found at '{firefox}'"})
 
+    def _stream_media(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        q: queue.Queue = queue.Queue()
+        observer = Observer(callback=q.put)
+        observer.start()
+        try:
+            while True:
+                state = q.get()
+                data = json.dumps(state)
+                self.wfile.write(f"data: {data}\n\n".encode())
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            observer.stop()
+
     def _handle_media(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
 
         try:
             data = json.loads(body)
-            action = data.get("action", "")
-            if action not in _MEDIA_ACTIONS:
-                raise ValueError(f"action must be one of: {', '.join(sorted(_MEDIA_ACTIONS))}")
-        except (json.JSONDecodeError, ValueError) as exc:
+        except json.JSONDecodeError as exc:
             self._respond(400, {"error": str(exc)})
             return
 
+        action = data.get("action", "")
+
         try:
-            subprocess.run(["playerctl", action], check=True, capture_output=True)
-            self._respond(200, {"action": action, "status": "ok"})
-        except FileNotFoundError:
-            self._respond(500, {"error": "playerctl not found — install with: apt install playerctl"})
-        except subprocess.CalledProcessError as exc:
-            self._respond(500, {"error": exc.stderr.decode().strip() or "playerctl failed"})
+            if action == "skip":
+                position = data.get("position")
+                if not isinstance(position, (int, float)):
+                    raise ValueError("skip requires a numeric 'position' field (seconds)")
+                playerctl.skip_to(float(position))
+            elif action == "seek":
+                offset = data.get("offset")
+                if not isinstance(offset, (int, float)):
+                    raise ValueError("seek requires a numeric 'offset' field (seconds, negative = backward)")
+                playerctl.seek_by(float(offset))
+            elif action == "volume":
+                level = data.get("level")
+                if not isinstance(level, (int, float)):
+                    raise ValueError("volume requires a numeric 'level' field (0.0–1.0)")
+                playerctl.set_volume(float(level))
+            else:
+                playerctl.run_action(action)
+        except ValueError as exc:
+            self._respond(400, {"error": str(exc)})
+            return
+        except PlayerctlError as exc:
+            self._respond(500, {"error": str(exc)})
+            return
+
+        self._respond(200, {"action": action, "status": "ok"})
 
     def _respond(self, code: int, body: dict) -> None:
         payload = json.dumps(body).encode()
